@@ -40,7 +40,7 @@ if aws iam get-user --user-name "$IAM_USER_NAME" >/dev/null 2>&1; then
       echo "Deleting access key: $key"
       aws iam delete-access-key --user-name "$IAM_USER_NAME" --access-key-id "$key" >/dev/null
     fi
-  fi
+  done
   
   # Detach managed policies
   for policy in $(aws iam list-attached-user-policies --user-name "$IAM_USER_NAME" --query "AttachedPolicies[].PolicyArn" --output text 2>/dev/null || true); do
@@ -48,7 +48,7 @@ if aws iam get-user --user-name "$IAM_USER_NAME" >/dev/null 2>&1; then
       echo "Detaching policy: $policy"
       aws iam detach-user-policy --user-name "$IAM_USER_NAME" --policy-arn "$policy" >/dev/null
     fi
-  fi
+  done
 
   # Delete inline policies
   for policy in $(aws iam list-user-policies --user-name "$IAM_USER_NAME" --query "PolicyNames[]" --output text 2>/dev/null || true); do
@@ -56,7 +56,7 @@ if aws iam get-user --user-name "$IAM_USER_NAME" >/dev/null 2>&1; then
       echo "Deleting inline policy: $policy"
       aws iam delete-user-policy --user-name "$IAM_USER_NAME" --policy-name "$policy" >/dev/null
     fi
-  fi
+  done
   
   # Delete user
   echo "Deleting user: $IAM_USER_NAME"
