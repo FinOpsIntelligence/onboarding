@@ -81,31 +81,67 @@ if ($RenewSecret -and [string]::IsNullOrEmpty($ClientId)) {
 
 function Ensure-GraphModule {
     Write-Info "Verifying PowerShell dependencies..."
-    if (-not (Get-Module -ListAvailable -Name Microsoft.Graph)) {
-        Write-Warn "Module 'Microsoft.Graph' not found. Installing..."
+    $requiredModules = @(
+        "Microsoft.Graph.Authentication",
+        "Microsoft.Graph.Applications"
+    )
+
+    foreach ($module in $requiredModules) {
+        Write-Info "Checking $module..."
+        $installed = Get-Module -ListAvailable -Name $module
+        if (-not $installed) {
+            Write-Info "Installing $module..."
+            try {
+                Install-Module $module -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+                Write-Info "$module installed successfully."
+            }
+            catch {
+                Write-Err "Failed to install $module: $($_.Exception.Message)"
+                Write-Err "Please run: Install-Module $module -Scope CurrentUser -Force -AllowClobber"
+                exit 1
+            }
+        }
+
+        Write-Info "Loading $module..."
         try {
-            # Install in CurrentUser scope to avoid administrative prompt requirement
-            Install-Module Microsoft.Graph -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
-            Write-Info "Module Microsoft.Graph installed successfully."
-            Write-Info "Please run the onboarding command again to continue:"
-            Write-Host "  iex (irm https://raw.githubusercontent.com/FinOpsIntelligence/onboarding/refs/heads/main/m365_onboarding.ps1)" -ForegroundColor Green
-            exit 0
+            Import-Module $module -ErrorAction Stop
+            Write-Info "$module loaded."
         }
         catch {
-            Write-Err "Failed to install Microsoft.Graph module: $($_.Exception.Message)"
-            Write-Err "Install manually using (for example):"
-            Write-Err "  Install-Module Microsoft.Graph -Scope CurrentUser -Force"
+            Write-Err "Failed to load $module: $($_.Exception.Message)"
             exit 1
         }
     }
 
-    try {
-        Import-Module Microsoft.Graph -ErrorAction Stop
+    # Validate required cmdlets
+    $requiredCmdlets = @(
+        "Connect-MgGraph",
+        "Get-MgContext",
+        "Get-MgApplication",
+        "New-MgApplication",
+        "Update-MgApplication",
+        "Add-MgApplicationPassword",
+        "Get-MgServicePrincipal",
+        "New-MgServicePrincipal",
+        "Get-MgServicePrincipalAppRoleAssignment"
+    )
+
+    Write-Info "Verifying required cmdlets..."
+    $missingCmdlets = @()
+    foreach ($cmdlet in $requiredCmdlets) {
+        if (-not (Get-Command -Name $cmdlet -ErrorAction SilentlyContinue)) {
+            $missingCmdlets += $cmdlet
+        }
     }
-    catch {
-        Write-Err "Failed to import Microsoft.Graph module: $($_.Exception.Message)"
+
+    if ($missingCmdlets.Count -gt 0) {
+        Write-Err "The following required cmdlets are missing: $($missingCmdlets -join ', ')"
+        Write-Err "Please reinstall the Graph modules by running the following commands:"
+        Write-Err "  Install-Module Microsoft.Graph.Authentication -Scope CurrentUser -Force -AllowClobber"
+        Write-Err "  Install-Module Microsoft.Graph.Applications -Scope CurrentUser -Force -AllowClobber"
         exit 1
     }
+    Write-Info "All required cmdlets verified successfully."
 }
 
 function Connect-GraphForOnboarding {
