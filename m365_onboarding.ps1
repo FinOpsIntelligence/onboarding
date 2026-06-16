@@ -39,7 +39,10 @@ param(
     [string]$ClientId,
 
     [Parameter(Mandatory = $false)]
-    [switch]$WriteEnvFile
+    [switch]$WriteEnvFile,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$UseDeviceCode
 )
 
 # ==========================================
@@ -147,20 +150,54 @@ function Ensure-GraphModule {
 function Connect-GraphForOnboarding {
     param(
         [Parameter(Mandatory = $false)]
-        [string]$TenantId
+        [string]$TenantId,
+        [Parameter(Mandatory = $false)]
+        [switch]$UseDeviceCode
     )
     $scopes = @("Application.ReadWrite.All", "Directory.Read.All")
     Write-Info "Connecting to Microsoft Graph with required delegated scopes..."
     
+    $isCloudShell = $env:AZURE_HTTP_USER_AGENT -like "*cloud-shell*" -or $env:ACC_TERM_ID -or $env:ACC_CLOUD
+    
     $connectParams = @{
-        Scopes = $scopes
-        ErrorAction = "Stop"
+        Scopes       = $scopes
+        ErrorAction  = "Stop"
+        ContextScope = "Process"
+        NoWelcome    = $true
     }
+    
     if (-not [string]::IsNullOrEmpty($TenantId)) {
         $connectParams["TenantId"] = $TenantId
     }
     
-    Connect-MgGraph @connectParams
+    if ($isCloudShell -or $UseDeviceCode) {
+        if ($isCloudShell) {
+            Write-Info "Azure Cloud Shell detected. Device code authentication will be used."
+        } else {
+            Write-Info "Device code authentication requested."
+        }
+        Write-Info "Open the URL shown by Microsoft, enter the code, and complete the login."
+        $connectParams["UseDeviceCode"] = $true
+    }
+    
+    try {
+        Connect-MgGraph @connectParams
+    }
+    catch {
+        $errorMessage = $_.ToString()
+        if ($null -ne $_.Exception) {
+            if ($null -ne $_.Exception.Message) {
+                $errorMessage += " " + $_.Exception.Message
+            }
+        }
+        if ($errorMessage -like "*timed out*") {
+            Write-Err "Authentication timed out. Run the script again and complete the Microsoft Graph login within 120 seconds."
+            exit 1
+        }
+        else {
+            throw $_
+        }
+    }
     
     $ctx = Get-MgContext
     if (-not $ctx -or -not $ctx.TenantId) {
@@ -624,7 +661,7 @@ try {
     Ensure-GraphModule
     
     # Establish connection and infer or validate TenantId
-    $activeTenantId = Connect-GraphForOnboarding -TenantId $TenantId
+    $activeTenantId = Connect-GraphForOnboarding -TenantId $TenantId -UseDeviceCode:$UseDeviceCode
     
     if ($ValidateOnly) {
         # Perform validation
