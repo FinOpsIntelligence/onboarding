@@ -163,7 +163,6 @@ function Connect-GraphForOnboarding {
         Scopes       = $scopes
         ErrorAction  = "Stop"
         ContextScope = "Process"
-        NoWelcome    = $true
     }
     
     if (-not [string]::IsNullOrEmpty($TenantId)) {
@@ -176,7 +175,20 @@ function Connect-GraphForOnboarding {
         } else {
             Write-Info "Device code authentication requested."
         }
-        Write-Info "Open the URL shown by Microsoft, enter the code, and complete the login."
+        
+        Write-Host ""
+        Write-Host "************************************************************" -ForegroundColor Yellow
+        Write-Host " ATTENTION: MICROSOFT GRAPH LOGIN REQUIRED " -ForegroundColor White -BackgroundColor Red
+        Write-Host "************************************************************" -ForegroundColor Yellow
+        Write-Host "To authenticate, you MUST open the browser login page and" -ForegroundColor Cyan
+        Write-Host "enter the temporary device code that Microsoft will display" -ForegroundColor Cyan
+        Write-Host "in the terminal below." -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "Look for the Microsoft instructions message starting with:" -ForegroundColor White
+        Write-Host "  'To sign in, use a web browser to open the page...'" -ForegroundColor Green
+        Write-Host "************************************************************" -ForegroundColor Yellow
+        Write-Host ""
+        
         $connectParams["UseDeviceCode"] = $true
     }
     
