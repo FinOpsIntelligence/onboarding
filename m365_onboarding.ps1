@@ -5,13 +5,13 @@
 .DESCRIPTION
   Este script automatiza o processo de onboarding de um tenant do Microsoft 365 para a Vulneri FinOps:
   - Cria ou atualiza um App Registration & Service Principal no Entra ID
-  - Configura RequiredResourceAccess para permissões de modo "Starter" ou "Expert"
-  - Tenta conceder o consentimento de administrador de forma automática
-  - Gera uma chave secreta (client secret) com expiração customizada
-  - Gera a URL de consentimento caso falhe a concessão automática
-  - Executa testes de validação na configuração final das permissões
+  - Configura RequiredResourceAccess para permissoes de modo "Starter" ou "Expert"
+  - Tenta conceder o consentimento de administrador de forma automatica
+  - Gera uma chave secreta (client secret) com expiracao customizada
+  - Gera a URL de consentimento caso falhe a concessao automatica
+  - Executa testes de validacao na configuracao final das permissoes
   - Renova segredos de aplicativos existentes
-  - Valida permissões de registros existentes
+  - Valida permissoes de registros existentes
 
 .EXAMPLE
   pwsh ./m365_onboarding.ps1 -Mode Starter
@@ -41,11 +41,15 @@ param(
     [string]$ClientId,
 
     [Parameter(Mandatory = $false)]
-    [switch]$WriteEnvFile
+    [switch]$WriteEnvFile,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateSet("Auto","Browser","DeviceCode")]
+    [string]$LoginMode = "Auto"
 )
 
 # ==========================================
-# 1. FUNÇÕES DE LOGGING (Português)
+# 1. FUNCOES DE LOGGING (Portugues)
 # ==========================================
 
 function Write-Info {
@@ -64,25 +68,25 @@ function Write-Err {
 }
 
 # ==========================================
-# 2. VALIDAÇÃO DE PARÂMETROS INICIAIS
+# 2. VALIDACAO DE PARAMETROS INICIAIS
 # ==========================================
 
 if ($ValidateOnly -and [string]::IsNullOrEmpty($ClientId)) {
-    Write-Err "O parâmetro -ClientId é obrigatório quando -ValidateOnly é utilizado."
+    Write-Err "O parametro -ClientId e obrigatorio quando -ValidateOnly e utilizado."
     exit 1
 }
 
 if ($RenewSecret -and [string]::IsNullOrEmpty($ClientId)) {
-    Write-Err "O parâmetro -ClientId é obrigatório quando -RenewSecret é utilizado."
+    Write-Err "O parametro -ClientId e obrigatorio quando -RenewSecret e utilizado."
     exit 1
 }
 
 # ==========================================
-# 3. VERIFICAÇÃO DE DEPENDÊNCIAS DO GRAPH
+# 3. VERIFICACAO DE DEPENDENCIAS DO GRAPH
 # ==========================================
 
 function Ensure-GraphModules {
-    Write-Info "Verificando dependências do PowerShell..."
+    Write-Info "Verificando dependencias do PowerShell..."
     
     if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
         try {
@@ -91,7 +95,7 @@ function Ensure-GraphModules {
         }
         catch {
             Write-Err "Falha ao instalar o NuGet Package Provider - $($_.Exception.Message)"
-            Write-Err "Por favor, execute o script em uma versão do PowerShell 7+ ou certifique-se de executar como um usuário com privilégios para instalar módulos em CurrentUser."
+            Write-Err "Por favor, execute o script em uma versao do PowerShell 7+ ou certifique-se de executar como um usuario com privilegios para instalar modulos em CurrentUser."
         }
     }
 
@@ -101,33 +105,33 @@ function Ensure-GraphModules {
     )
 
     foreach ($module in $requiredModules) {
-        Write-Info "Verificando módulo $module..."
+        Write-Info "Verificando modulo $module..."
         $installed = Get-Module -ListAvailable -Name $module
         if (-not $installed) {
-            Write-Info "Instalando módulo $module..."
+            Write-Info "Instalando modulo $module..."
             try {
                 Install-Module $module -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
-                Write-Info "Módulo $module instalado com sucesso."
+                Write-Info "Modulo $module instalado com sucesso."
             }
             catch {
-                Write-Err "Falha ao instalar o módulo $module - $($_.Exception.Message)"
+                Write-Err "Falha ao instalar o modulo $module - $($_.Exception.Message)"
                 Write-Err "Por favor, execute manualmente: Install-Module $module -Scope CurrentUser -Force -AllowClobber"
                 exit 1
             }
         }
 
-        Write-Info "Carregando módulo $module..."
+        Write-Info "Carregando modulo $module..."
         try {
             Import-Module $module -ErrorAction Stop
-            Write-Info "Módulo $module carregado com sucesso."
+            Write-Info "Modulo $module carregado com sucesso."
         }
         catch {
-            Write-Err "Falha ao carregar o módulo $module - $($_.Exception.Message)"
+            Write-Err "Falha ao carregar o modulo $module - $($_.Exception.Message)"
             exit 1
         }
     }
 
-    # Validar cmdlets obrigatórios
+    # Validar cmdlets obrigatorios
     $requiredCmdlets = @(
         "Connect-MgGraph",
         "Get-MgContext",
@@ -142,7 +146,7 @@ function Ensure-GraphModules {
         "Invoke-MgGraphRequest"
     )
 
-    Write-Info "Validando cmdlets obrigatórios..."
+    Write-Info "Validando cmdlets obrigatorios..."
     $missingCmdlets = @()
     foreach ($cmdlet in $requiredCmdlets) {
         if (-not (Get-Command -Name $cmdlet -ErrorAction SilentlyContinue)) {
@@ -151,64 +155,81 @@ function Ensure-GraphModules {
     }
 
     if ($missingCmdlets.Count -gt 0) {
-        Write-Err "Os seguintes cmdlets obrigatórios estão ausentes: $($missingCmdlets -join ', ')"
-        Write-Err "Por favor, reinstale os módulos executando:"
+        Write-Err "Os seguintes cmdlets obrigatorios estao ausentes: $($missingCmdlets -join ', ')"
+        Write-Err "Por favor, reinstale os modulos executando:"
         Write-Err "  Install-Module Microsoft.Graph.Authentication -Scope CurrentUser -Force -AllowClobber"
         Write-Err "  Install-Module Microsoft.Graph.Applications -Scope CurrentUser -Force -AllowClobber"
         exit 1
     }
-    Write-Info "Todos os cmdlets obrigatórios foram validados com sucesso."
+    Write-Info "Todos os cmdlets obrigatorios foram validados com sucesso."
 }
 
 # ==========================================
-# 4. AUTENTICAÇÃO E METADADOS DO TENANT
+# 4. AUTENTICACAO E METADADOS DO TENANT
 # ==========================================
 
 function Connect-M365Tenant {
     param(
         [Parameter(Mandatory = $false)]
-        [string]$TenantId
+        [string]$TenantId,
+        [Parameter(Mandatory = $false)]
+        [string]$LoginMode = "Auto"
     )
     $scopes = @("Application.ReadWrite.All", "AppRoleAssignment.ReadWrite.All", "Directory.Read.All")
-    Write-Info "Conectando ao Microsoft Graph com escopos delegados necessários..."
+    Write-Info "Conectando ao Microsoft Graph com escopos delegados necessarios..."
     
     Write-Host ""
     Write-Host "************************************************************" -ForegroundColor Yellow
-    Write-Host "               LOGIN MICROSOFT 365 NECESSÁRIO               " -ForegroundColor White -BackgroundColor Red
+    Write-Host "                    LOGIN MICROSOFT 365                     " -ForegroundColor White -BackgroundColor Red
     Write-Host "************************************************************" -ForegroundColor Yellow
-    Write-Host "Para se autenticar, você DEVE abrir a página de login no navegador" -ForegroundColor Cyan
-    Write-Host "e inserir o código de dispositivo temporário que a Microsoft exibirá" -ForegroundColor Cyan
-    Write-Host "no terminal abaixo." -ForegroundColor Cyan
+    Write-Host "O script vai abrir uma janela do navegador para voce fazer login" -ForegroundColor Cyan
+    Write-Host "com uma conta administrativa do Microsoft 365." -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "Procure a mensagem da Microsoft iniciando com:" -ForegroundColor White
-    Write-Host "  'Para entrar, use um navegador da Web para abrir a página...'" -ForegroundColor Green
-    Write-Host "  (Ou 'To sign in, use a web browser to open the page...')" -ForegroundColor Green
+    Write-Host "Se o navegador nao abrir automaticamente, o script usara o modo" -ForegroundColor Cyan
+    Write-Host "codigo de dispositivo como alternativa." -ForegroundColor Cyan
     Write-Host "************************************************************" -ForegroundColor Yellow
     Write-Host ""
     
-    try {
-        $connectCommand = Get-Command Connect-MgGraph -ErrorAction Stop
-        $connectParams = @{
-            Scopes       = $scopes
-            ContextScope = "Process"
-            ErrorAction  = "Stop"
-        }
+    $connectCommand = Get-Command Connect-MgGraph -ErrorAction Stop
+    $connectParams = @{
+        Scopes       = $scopes
+        ContextScope = "Process"
+        ErrorAction  = "Stop"
+    }
 
-        if (-not [string]::IsNullOrEmpty($TenantId)) {
-            $connectParams["TenantId"] = $TenantId
-        }
+    if (-not [string]::IsNullOrEmpty($TenantId)) {
+        $connectParams["TenantId"] = $TenantId
+    }
 
-        if ($connectCommand.Parameters.ContainsKey("UseDeviceCode")) {
-            $connectParams["UseDeviceCode"] = $true
+    $executeDeviceCode = {
+        if ($connectCommand.Parameters.ContainsKey("UseDeviceAuthentication")) {
+            Connect-MgGraph @connectParams -UseDeviceAuthentication
         }
-        elseif ($connectCommand.Parameters.ContainsKey("UseDeviceAuthentication")) {
-            $connectParams["UseDeviceAuthentication"] = $true
+        elseif ($connectCommand.Parameters.ContainsKey("UseDeviceCode")) {
+            Connect-MgGraph @connectParams -UseDeviceCode
         }
         else {
-            Write-Warn "Parâmetro de Device Code não encontrado. Usando autenticação interativa padrão."
+            Write-Warn "Parametro de Device Code nao encontrado. Usando autenticacao interativa padrao."
+            Connect-MgGraph @connectParams
         }
+    }
 
-        Connect-MgGraph @connectParams
+    try {
+        if ($LoginMode -eq "Browser") {
+            Connect-MgGraph @connectParams
+        }
+        elif ($LoginMode -eq "DeviceCode") {
+            & $executeDeviceCode
+        }
+        else { # Auto
+            try {
+                Connect-MgGraph @connectParams
+            }
+            catch {
+                Write-Warn "Nao foi possivel abrir o login no navegador. Tentando login por codigo de dispositivo."
+                & $executeDeviceCode
+            }
+        }
     }
     catch {
         $errorMessage = $_.ToString()
@@ -218,7 +239,7 @@ function Connect-M365Tenant {
             }
         }
         if ($errorMessage -like "*timed out*") {
-            Write-Err "O tempo limite de autenticação expirou. Execute o script novamente e conclua o login do Microsoft Graph em até 120 segundos."
+            Write-Err "O tempo limite de autenticacao expirou. Execute o script novamente e conclua o login do Microsoft Graph em ate 120 segundos."
             exit 1
         }
         else {
@@ -228,11 +249,11 @@ function Connect-M365Tenant {
     
     $ctx = Get-MgContext
     if (-not $ctx -or -not $ctx.TenantId) {
-        throw "Não foi possível recuperar o TenantId do contexto ativo do Microsoft Graph."
+        throw "Nao foi possivel recuperar o TenantId do contexto ativo do Microsoft Graph."
     }
     
     if (-not [string]::IsNullOrEmpty($TenantId) -and $ctx.TenantId -ne $TenantId) {
-        Write-Err "O Tenant autenticado ($($ctx.TenantId)) é diferente do TenantId informado ($TenantId)."
+        Write-Err "O Tenant autenticado ($($ctx.TenantId)) e diferente do TenantId informado ($TenantId)."
         exit 1
     }
     
@@ -253,7 +274,7 @@ function Connect-M365Tenant {
         }
     }
     catch {
-        Write-Warn "Não foi possível consultar os detalhes do Tenant via API Graph: $($_.Exception.Message)"
+        Write-Warn "Nao foi possivel consultar os detalhes do Tenant via API Graph: $($_.Exception.Message)"
     }
     
     if ([string]::IsNullOrEmpty($TenantId)) {
@@ -261,19 +282,19 @@ function Connect-M365Tenant {
         Write-Host "Inquilino (Tenant) Detectado:" -ForegroundColor Cyan
         Write-Host "  ID do Tenant:   $($ctx.TenantId)" -ForegroundColor Cyan
         Write-Host "  Nome do Tenant: $tenantName" -ForegroundColor Cyan
-        Write-Host "  Domínio Padrão: $primaryDomain" -ForegroundColor Cyan
+        Write-Host "  Dominio Padrao: $primaryDomain" -ForegroundColor Cyan
         Write-Host ""
-        Write-Host "Você confirma que deseja realizar o onboarding neste Tenant? (S/N): " -NoNewline
+        Write-Host "Voce confirma que deseja realizar o onboarding neste Tenant? (S/N): " -NoNewline
         $confirm = Read-Host
         if ($confirm -notmatch "^[sSyY]") {
-            Write-Err "Onboarding cancelado pelo usuário."
+            Write-Err "Onboarding cancelado pelo usuario."
             exit 1
         }
     } else {
         Write-Info "Tenant Autenticado:"
         Write-Info "  ID do Tenant:   $($ctx.TenantId)"
         Write-Info "  Nome do Tenant: $tenantName"
-        Write-Info "  Domínio Padrão: $primaryDomain"
+        Write-Info "  Dominio Padrao: $primaryDomain"
     }
     
     return [pscustomobject]@{
@@ -284,7 +305,7 @@ function Connect-M365Tenant {
 }
 
 # ==========================================
-# 5. PERMISSÕES E CONFIGURAÇÃO DO ENTIDADE
+# 5. PERMISSOES E CONFIGURACAO DO ENTIDADE
 # ==========================================
 
 function Get-PermissionsForMode {
@@ -319,7 +340,7 @@ function Get-GraphServicePrincipal {
     $graphAppId = "00000003-0000-0000-c000-000000000000"
     $graphSp = Get-MgServicePrincipal -Filter "appId eq '$graphAppId'" -ErrorAction Stop
     if (-not $graphSp) {
-        throw "Não foi possível localizar o Service Principal do Microsoft Graph."
+        throw "Nao foi possivel localizar o Service Principal do Microsoft Graph."
     }
     return $graphSp
 }
@@ -337,7 +358,7 @@ function Resolve-GraphAppRoles {
             $_.Value -eq $val -and $_.AllowedMemberTypes -contains "Application"
         }
         if (-not $role) {
-            throw "A permissão (AppRole) '$val' não foi encontrada no Service Principal do Microsoft Graph."
+            throw "A permissao (AppRole) '$val' nao foi encontrada no Service Principal do Microsoft Graph."
         }
         $appRoleMap[$val] = $role.Id
     }
@@ -345,7 +366,7 @@ function Resolve-GraphAppRoles {
 }
 
 # ==========================================
-# 6. CRIAÇÃO E RENOVAÇÃO DO APLICATIVO
+# 6. CRIACAO E RENOVACAO DO APLICATIVO
 # ==========================================
 
 function New-VulneriM365Application {
@@ -359,12 +380,12 @@ function New-VulneriM365Application {
     )
     $graphAppId = "00000003-0000-0000-c000-000000000000"
     
-    Write-Info "Verificando se um App Registration com o nome '$DisplayName' já existe..."
+    Write-Info "Verificando se um App Registration com o nome '$DisplayName' ja existe..."
     $existingApps = Get-MgApplication -Filter "displayName eq '$DisplayName'" -ErrorAction SilentlyContinue
     
     $app = $null
     if ($existingApps) {
-        Write-Warn "Um App Registration com o nome '$DisplayName' já existe no seu inquilino."
+        Write-Warn "Um App Registration com o nome '$DisplayName' ja existe no seu inquilino."
         Write-Host "Deseja reutilizar o App Registration existente? (S/N): " -NoNewline
         $choice = Read-Host
         
@@ -392,7 +413,7 @@ function New-VulneriM365Application {
     )
     
     if ($app) {
-        Write-Info "Atualizando as permissões configuradas no App Registration..."
+        Write-Info "Atualizando as permissoes configuradas no App Registration..."
         $updateParams = @{
             RequiredResourceAccess = $requiredResourceAccess
         }
@@ -419,7 +440,7 @@ function New-VulneriM365Application {
         $sp = New-MgServicePrincipal -AppId $app.AppId -ErrorAction Stop
         Write-Info "Service Principal criado com sucesso."
     } else {
-        Write-Info "Service Principal já existe."
+        Write-Info "Service Principal ja existe."
     }
     
     return [pscustomobject]@{
@@ -472,7 +493,7 @@ function Get-AdminConsentUrl {
 }
 
 # ==========================================
-# 7. VALIDAÇÃO E RENOVAÇÃO
+# 7. VALIDACAO E RENOVACAO
 # ==========================================
 
 function Test-VulneriM365Onboarding {
@@ -484,7 +505,7 @@ function Test-VulneriM365Onboarding {
         [Parameter(Mandatory = $true)]
         [string]$Mode
     )
-    Write-Info "Iniciando a validação do registro do aplicativo ClientId: $ClientId..."
+    Write-Info "Iniciando a validacao do registro do aplicativo ClientId: $ClientId..."
     
     $permissionsExpected = Get-PermissionsForMode -Mode $Mode
     $checkedAt = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
@@ -493,13 +514,13 @@ function Test-VulneriM365Onboarding {
         Write-Info "Localizando o App Registration..."
         $app = Get-MgApplication -Filter "appId eq '$ClientId'" -ErrorAction Stop
         if (-not $app) {
-            throw "App Registration com o ClientId '$ClientId' não foi encontrado."
+            throw "App Registration com o ClientId '$ClientId' nao foi encontrado."
         }
         
         Write-Info "Localizando o Service Principal..."
         $sp = Get-MgServicePrincipal -Filter "appId eq '$ClientId'" -ErrorAction Stop
         if (-not $sp) {
-            throw "Service Principal correspondente ao ClientId '$ClientId' não foi encontrado."
+            throw "Service Principal correspondente ao ClientId '$ClientId' nao foi encontrado."
         }
         
         $graphSp = Get-GraphServicePrincipal
@@ -526,7 +547,7 @@ function Test-VulneriM365Onboarding {
         }
         
         $permissionsGranted = @()
-        Write-Info "Buscando permissões com consentimento administrativo..."
+        Write-Info "Buscando permissoes com consentimento administrativo..."
         $assignments = Get-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $sp.Id -All -ErrorAction Stop
         if ($assignments) {
             $graphAssignments = $assignments | Where-Object { $_.ResourceId -eq $graphSp.Id }
@@ -557,14 +578,14 @@ function Test-VulneriM365Onboarding {
         $validationStatus = "ready"
         if ($permissionsMissing.Count -gt 0) {
             $validationStatus = "missing_permissions"
-            Write-Warn "Validação: Algumas permissões obrigatórias não estão configuradas no RequiredResourceAccess."
+            Write-Warn "Validacao: Algumas permissoes obrigatorias nao estao configuradas no RequiredResourceAccess."
         }
         elseif ($permissionsPendingConsent.Count -gt 0) {
             $validationStatus = "pending_admin_consent"
-            Write-Warn "Validação: Permissões configuradas estão aguardando consentimento administrativo."
+            Write-Warn "Validacao: Permissoes configuradas estao aguardando consentimento administrativo."
         }
         else {
-            Write-Info "Validação: Tudo pronto! Todas as permissões obrigatórias foram configuradas e consentidas."
+            Write-Info "Validacao: Tudo pronto! Todas as permissoes obrigatorias foram configuradas e consentidas."
         }
         
         $output = @{
@@ -584,7 +605,7 @@ function Test-VulneriM365Onboarding {
         return $output
     }
     catch {
-        Write-Err "Erro durante a validação: $($_.Exception.Message)"
+        Write-Err "Erro durante a validacao: $($_.Exception.Message)"
         return @{
             provider                   = "m365"
             mode                       = $Mode.ToLower()
@@ -611,13 +632,13 @@ function Renew-VulneriM365Secret {
         [Parameter(Mandatory = $true)]
         [int]$SecretMonths
     )
-    Write-Info "Iniciando a renovação do Client Secret para o ClientId: $ClientId..."
+    Write-Info "Iniciando a renovacao do Client Secret para o ClientId: $ClientId..."
     
     try {
         Write-Info "Localizando o App Registration no inquilino..."
         $app = Get-MgApplication -Filter "appId eq '$ClientId'" -ErrorAction Stop
         if (-not $app) {
-            throw "App Registration com o ClientId '$ClientId' não foi encontrado."
+            throw "App Registration com o ClientId '$ClientId' nao foi encontrado."
         }
         
         $secret = New-VulneriM365Secret -ApplicationObjectId $app.Id -SecretMonths $SecretMonths
@@ -643,7 +664,7 @@ function Renew-VulneriM365Secret {
 }
 
 # ==========================================
-# 8. PROCESSAMENTO DA SAÍDA JSON / .ENV
+# 8. PROCESSAMENTO DA SAIDA JSON / .ENV
 # ==========================================
 
 function ConvertTo-SafeJsonOutput {
@@ -670,7 +691,7 @@ function Write-OptionalEnvFile {
     $envPath = Join-Path -Path (Get-Location) -ChildPath ".env"
     
     if (Test-Path $envPath) {
-        Write-Warn "O arquivo '.env' já existe no diretório atual e será sobrescrito."
+        Write-Warn "O arquivo '.env' ja existe no diretorio atual e sera sobrescrito."
     }
     
     $lines = @(
@@ -688,48 +709,48 @@ function Write-OptionalEnvFile {
     $lines | Out-File -FilePath $envPath -Encoding ascii -Force
     
     Write-Warn "============================================================"
-    Write-Warn "AVISO DE SEGURANÇA: Arquivo .env gerado em: $envPath"
+    Write-Warn "AVISO DE SEGURANCA: Arquivo .env gerado em: $envPath"
     Write-Warn "Use -WriteEnvFile apenas para testes ou ambientes controlados."
-    Write-Warn "Este arquivo contém credenciais altamente confidenciais."
-    Write-Warn "Nunca envie este arquivo para repositórios Git ou compartilhe-o."
+    Write-Warn "Este arquivo contem credenciais altamente confidenciais."
+    Write-Warn "Nunca envie este arquivo para repositorios Git ou compartilhe-o."
     Write-Warn "============================================================"
 }
 
 # ==========================================
-# 9. FLUXO PRINCIPAL DE EXECUÇÃO
+# 9. FLUXO PRINCIPAL DE EXECUCAO
 # ==========================================
 
 try {
     Write-Host "== Vulneri Microsoft 365 Onboarding ==" -ForegroundColor Cyan
-    Write-Info "Este script configura os acessos necessários do Microsoft 365 para auditoria de FinOps."
-    Write-Info "Privilégios de Administrador local não são necessários; no entanto, privilégios de Administrador de Tenant são requeridos."
+    Write-Info "Este script configura os acessos necessarios do Microsoft 365 para auditoria de FinOps."
+    Write-Info "Privilegios de Administrador local nao sao necessarios; no entanto, privilegios de Administrador de Tenant sao requeridos."
     
     if ($ValidateOnly) {
-        Write-Info "Modo Selecionado: Validação de Permissões (-ValidateOnly)"
+        Write-Info "Modo Selecionado: Validacao de Permissoes (-ValidateOnly)"
     } elseif ($RenewSecret) {
-        Write-Info "Modo Selecionado: Renovação de Credenciais (-RenewSecret)"
+        Write-Info "Modo Selecionado: Renovacao de Credenciais (-RenewSecret)"
     } else {
         Write-Info "Modo Selecionado: $Mode"
         if ($Mode -eq "Starter") {
-            Write-Info "Este modo solicita apenas permissões de leitura para inventário de licenças e relatórios de uso."
+            Write-Info "Este modo solicita apenas permissoes de leitura para inventario de licencas e relatorios de uso."
         } else {
-            Write-Info "Este modo solicita permissões adicionais para políticas de segurança, logs de auditoria e identidades."
+            Write-Info "Este modo solicita permissoes adicionais para politicas de seguranca, logs de auditoria e identidades."
         }
     }
     Write-Host ""
     
-    # 1. Carregar dependências
+    # 1. Carregar dependencias
     Ensure-GraphModules
     
     # 2. Conectar e obter metadados
-    $tenantDetails = Connect-M365Tenant -TenantId $TenantId
+    $tenantDetails = Connect-M365Tenant -TenantId $TenantId -LoginMode $LoginMode
     
     if ($ValidateOnly) {
-        # Executar validação
+        # Executar validacao
         $valOutput = Test-VulneriM365Onboarding -TenantId $tenantDetails.TenantId -ClientId $ClientId -Mode $Mode
         
         Write-Host "============================================================" -ForegroundColor Cyan
-        Write-Host "RESULTADO DA VALIDAÇÃO (JSON):" -ForegroundColor Cyan
+        Write-Host "RESULTADO DA VALIDACAO (JSON):" -ForegroundColor Cyan
         $json = ConvertTo-SafeJsonOutput -Payload $valOutput
         Write-Host $json -ForegroundColor Green
         Write-Host "============================================================" -ForegroundColor Cyan
@@ -739,11 +760,11 @@ try {
         }
     }
     elseif ($RenewSecret) {
-        # Executar renovação
+        # Executar renovacao
         $renewOutput = Renew-VulneriM365Secret -TenantId $tenantDetails.TenantId -ClientId $ClientId -SecretMonths $SecretMonths
         
         Write-Host ""
-        Write-Warn "Recomendação: Remova as secrets antigas no console do Azure/Entra apenas após confirmar o funcionamento da nova credencial na plataforma Vulneri."
+        Write-Warn "Recomendacao: Remova as secrets antigas no console do Azure/Entra apenas apos confirmar o funcionamento da nova credencial na plataforma Vulneri."
         Write-Host "============================================================" -ForegroundColor Cyan
         Write-Host "COPIE E COLE O JSON ABAIXO NA PLATAFORMA VULNERI:" -ForegroundColor Cyan
         $json = ConvertTo-SafeJsonOutput -Payload $renewOutput
@@ -755,10 +776,10 @@ try {
         }
     }
     else {
-        # Executar fluxo completo de criação
+        # Executar fluxo completo de criacao
         $permissions = Get-PermissionsForMode -Mode $Mode
         
-        Write-Info "Carregando informações do Service Principal do Microsoft Graph..."
+        Write-Info "Carregando informacoes do Service Principal do Microsoft Graph..."
         $graphSp = Get-GraphServicePrincipal
         $appRoleMap = Resolve-GraphAppRoles -GraphSp $graphSp -Permissions $permissions
         
@@ -766,13 +787,13 @@ try {
         $app = $appResult.Application
         $sp = $appResult.ServicePrincipal
         
-        # Criar a secret, mantendo apenas em memória
+        # Criar a secret, mantendo apenas em memoria
         $secretResult = New-VulneriM365Secret -ApplicationObjectId $app.Id -SecretMonths $SecretMonths
         
-        # Tentar aplicar consentimento automático (AppRoleAssignments)
+        # Tentar aplicar consentimento automatico (AppRoleAssignments)
         $automaticConsentFailed = $false
         
-        Write-Info "Buscando permissões já concedidas para evitar duplicidade..."
+        Write-Info "Buscando permissoes ja concedidas para evitar duplicidade..."
         $existingAssignments = Get-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $sp.Id -All -ErrorAction SilentlyContinue
         
         foreach ($permission in $permissions) {
@@ -782,14 +803,14 @@ try {
                 $_.ResourceId -eq $graphSp.Id -and $_.AppRoleId -eq $roleId
             }
             if ($alreadyGranted) {
-                Write-Info "A permissão '$permission' já estava concedida."
+                Write-Info "A permissao '$permission' ja estava concedida."
                 continue
             }
             
-            Write-Info "Tentando conceder a permissão '$permission' de forma automática..."
+            Write-Info "Tentando conceder a permissao '$permission' de forma automatica..."
             try {
                 New-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $sp.Id -PrincipalId $sp.Id -ResourceId $graphSp.Id -AppRoleId $roleId -ErrorAction Stop | Out-Null
-                Write-Info "Permissão '$permission' concedida com sucesso."
+                Write-Info "Permissao '$permission' concedida com sucesso."
             }
             catch {
                 $err = $_.ToString()
@@ -798,9 +819,9 @@ try {
                 }
                 
                 if ($err -like "*already exists*" -or $err -like "*PermissionAlreadyExists*") {
-                    Write-Info "A permissão '$permission' já havia sido concedida."
+                    Write-Info "A permissao '$permission' ja havia sido concedida."
                 } else {
-                    Write-Warn "Não foi possível conceder a permissão '$permission' de forma automática."
+                    Write-Warn "Nao foi possivel conceder a permissao '$permission' de forma automatica."
                     $automaticConsentFailed = $true
                 }
             }
@@ -808,30 +829,30 @@ try {
         
         $consentUrl = Get-AdminConsentUrl -TenantId $tenantDetails.TenantId -ClientId $app.AppId
         
-        # Loop interativo de validação de consentimento de administrador
+        # Loop interativo de validacao de consentimento de administrador
         $validated = $false
         while (-not $validated) {
             if ($automaticConsentFailed) {
                 Write-Host ""
                 Write-Host "============================================================" -ForegroundColor Yellow
-                Write-Host "AÇÃO REQUERIDA: CONCEDER CONSENTIMENTO DO ADMINISTRADOR" -ForegroundColor Yellow
+                Write-Host "ACAO REQUERIDA: CONCEDER CONSENTIMENTO DO ADMINISTRADOR" -ForegroundColor Yellow
                 Write-Host "============================================================" -ForegroundColor Yellow
                 Write-Host "O aplicativo foi criado no seu tenant Microsoft 365,"
-                Write-Host "mas não pôde ser autorizado de forma automática devido a limitações de privilégio do seu usuário atual."
+                Write-Host "mas nao pode ser autorizado de forma automatica devido a limitacoes de privilegio do seu usuario atual."
                 Write-Host ""
-                Write-Host "Um administrador com privilégios do tenant precisa conceder o consentimento das permissões."
+                Write-Host "Um administrador com privilegios do tenant precisa conceder o consentimento das permissoes."
                 Write-Host "Quem pode fazer isso:"
                 Write-Host "- Administrador Global"
-                Write-Host "- Administrador de Função Privilegiada"
+                Write-Host "- Administrador de Funcao Privilegiada"
                 Write-Host ""
-                Write-Host "Abra a URL abaixo no seu navegador, faça o login com uma conta administrativa,"
-                Write-Host "revise as permissões solicitadas e clique em Aceitar."
+                Write-Host "Abra a URL abaixo no seu navegador, faca o login com uma conta administrativa,"
+                Write-Host "revise as permissoes solicitadas e clique em Aceitar."
                 Write-Host "Em seguida, retorne a este terminal e pressione ENTER para validar."
                 Write-Host ""
                 Write-Host "Importante:"
-                Write-Host "O Client Secret foi gerado em memória, mas só será exibido após"
-                Write-Host "a validação do consentimento. Se fechar este terminal antes de validar,"
-                Write-Host "você deverá gerar uma nova chave executando o script com -RenewSecret."
+                Write-Host "O Client Secret foi gerado em memoria, mas so sera exibido apos"
+                Write-Host "a validacao do consentimento. Se fechar este terminal antes de validar,"
+                Write-Host "voce devera gerar uma nova chave executando o script com -RenewSecret."
                 Write-Host "============================================================" -ForegroundColor Yellow
                 Write-Host ""
                 Write-Host "URL de Consentimento do Administrador:" -ForegroundColor Yellow
@@ -851,16 +872,16 @@ try {
                     }
                 }
                 catch {
-                    Write-Warn "Não foi possível abrir o navegador automaticamente: $($_.Exception.Message)"
+                    Write-Warn "Nao foi possivel abrir o navegador automaticamente: $($_.Exception.Message)"
                     Write-Warn "Por favor, copie e cole a URL acima manualmente no seu navegador."
                 }
                 
                 Write-Host ""
-                Write-Host "Pressione ENTER após conceder o consentimento no navegador..." -NoNewline
+                Write-Host "Pressione ENTER apos conceder o consentimento no navegador..." -NoNewline
                 $null = Read-Host
             }
             
-            # Rodar verificação de validação automática
+            # Rodar verificacao de validacao automatica
             $valResult = Test-VulneriM365Onboarding -TenantId $tenantDetails.TenantId -ClientId $app.AppId -Mode $Mode
             
             if ($valResult.validationStatus -eq "ready") {
@@ -872,13 +893,13 @@ try {
                 Write-Host ""
                 
                 # Resumo
-                Write-Host "== RESUMO DA INSTALAÇÃO ==" -ForegroundColor Cyan
+                Write-Host "== RESUMO DA INSTALACAO ==" -ForegroundColor Cyan
                 Write-Host "ID do Tenant Microsoft 365:   $($tenantDetails.TenantId)"
                 Write-Host "Nome do Tenant:               $($tenantDetails.TenantName)"
-                Write-Host "Domínio Padrão:               $($tenantDetails.PrimaryDomain)"
+                Write-Host "Dominio Padrao:               $($tenantDetails.PrimaryDomain)"
                 Write-Host "ID do Cliente (ClientId):     $($app.AppId)"
                 Write-Host "Secret do Cliente (Secret):   [Exibido apenas no JSON abaixo]"
-                Write-Warn "Salve a chave secreta agora. Ela não será exibida novamente."
+                Write-Warn "Salve a chave secreta agora. Ela nao sera exibida novamente."
                 Write-Host ""
                 Write-Info "Copie o JSON abaixo e cadastre-o na plataforma Vulneri."
                 Write-Host ""
@@ -910,25 +931,25 @@ try {
                     Write-OptionalEnvFile -TenantId $tenantDetails.TenantId -ClientId $app.AppId -ClientSecret $secretResult.SecretText -SecretExpiresAt $secretResult.ExpiresAt -Mode $Mode
                 }
             } else {
-                $automaticConsentFailed = $true # Forçar menu manual no loop de repetição
+                $automaticConsentFailed = $true # Forcar menu manual no loop de repeticao
                 Write-Host ""
-                Write-Err "A validação falhou ou está incompleta (Status: $($valResult.validationStatus))"
+                Write-Err "A validacao falhou ou esta incompleta (Status: $($valResult.validationStatus))"
                 if ($valResult.permissionsPendingConsent.Count -gt 0) {
-                    Write-Err "Permissões configuradas aguardando consentimento: $($valResult.permissionsPendingConsent -join ', ')"
+                    Write-Err "Permissoes configuradas aguardando consentimento: $($valResult.permissionsPendingConsent -join ', ')"
                 }
                 if ($valResult.permissionsMissing.Count -gt 0) {
-                    Write-Err "Permissões ausentes na configuração do aplicativo: $($valResult.permissionsMissing -join ', ')"
+                    Write-Err "Permissoes ausentes na configuracao do aplicativo: $($valResult.permissionsMissing -join ', ')"
                 }
                 Write-Host ""
                 
-                Write-Host "Deseja tentar a validação novamente agora? (S/N): " -NoNewline
+                Write-Host "Deseja tentar a validacao novamente agora? (S/N): " -NoNewline
                 $choice = Read-Host
                 
                 if ($choice -notmatch "^[sSyY]") {
-                    Write-Warn "Onboarding suspenso. O App Registration foi criado, mas as credenciais não foram validadas."
+                    Write-Warn "Onboarding suspenso. O App Registration foi criado, mas as credenciais nao foram validadas."
                     Write-Warn "Para validar novamente mais tarde, execute:"
                     Write-Warn "  ./m365_onboarding.ps1 -ValidateOnly -ClientId $($app.AppId) -TenantId $($tenantDetails.TenantId) -Mode $Mode"
-                    Write-Warn "Se você fechou este terminal e precisa gerar uma nova secret, execute:"
+                    Write-Warn "Se voce fechou este terminal e precisa gerar uma nova secret, execute:"
                     Write-Warn "  ./m365_onboarding.ps1 -RenewSecret -ClientId $($app.AppId) -TenantId $($tenantDetails.TenantId)"
                     break
                 }
@@ -937,6 +958,6 @@ try {
     }
 }
 catch {
-    Write-Err "Ocorreu um erro inesperado durante a execução: $($_.Exception.Message)"
+    Write-Err "Ocorreu um erro inesperado durante a execucao: $($_.Exception.Message)"
     exit 1
 }
