@@ -218,10 +218,10 @@ function Connect-M365Tenant {
         if ($LoginMode -eq "Browser") {
             Connect-MgGraph @connectParams
         }
-        elif ($LoginMode -eq "DeviceCode") {
+        elseif ($LoginMode -eq "DeviceCode") {
             & $executeDeviceCode
         }
-        else { # Auto
+        elseif ($LoginMode -eq "Auto") {
             try {
                 Connect-MgGraph @connectParams
             }
@@ -229,6 +229,9 @@ function Connect-M365Tenant {
                 Write-Warn "Nao foi possivel abrir o login no navegador. Tentando login por codigo de dispositivo."
                 & $executeDeviceCode
             }
+        }
+        else {
+            throw "LoginMode invalido: $LoginMode"
         }
     }
     catch {
