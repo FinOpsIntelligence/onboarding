@@ -83,6 +83,18 @@ if ($RenewSecret -and [string]::IsNullOrEmpty($ClientId)) {
 
 function Ensure-GraphModules {
     Write-Info "Verificando dependências do PowerShell..."
+    
+    if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
+        try {
+            Write-Info "Garantindo NuGet package provider..."
+            Install-PackageProvider -Name NuGet -Scope CurrentUser -Force -ErrorAction Stop
+        }
+        catch {
+            Write-Err "Falha ao instalar o NuGet Package Provider - $($_.Exception.Message)"
+            Write-Err "Por favor, execute o script em uma versão do PowerShell 7+ ou certifique-se de executar como um usuário com privilégios para instalar módulos em CurrentUser."
+        }
+    }
+
     $requiredModules = @(
         "Microsoft.Graph.Authentication",
         "Microsoft.Graph.Applications"
@@ -126,7 +138,8 @@ function Ensure-GraphModules {
         "Get-MgServicePrincipal",
         "New-MgServicePrincipal",
         "Get-MgServicePrincipalAppRoleAssignment",
-        "New-MgServicePrincipalAppRoleAssignment"
+        "New-MgServicePrincipalAppRoleAssignment",
+        "Invoke-MgGraphRequest"
     )
 
     Write-Info "Validando cmdlets obrigatórios..."
@@ -161,23 +174,41 @@ function Connect-M365Tenant {
     
     Write-Host ""
     Write-Host "************************************************************" -ForegroundColor Yellow
-    Write-Host " ATTENTION: MICROSOFT GRAPH LOGIN REQUIRED " -ForegroundColor White -BackgroundColor Red
+    Write-Host "               LOGIN MICROSOFT 365 NECESSÁRIO               " -ForegroundColor White -BackgroundColor Red
     Write-Host "************************************************************" -ForegroundColor Yellow
     Write-Host "Para se autenticar, você DEVE abrir a página de login no navegador" -ForegroundColor Cyan
     Write-Host "e inserir o código de dispositivo temporário que a Microsoft exibirá" -ForegroundColor Cyan
     Write-Host "no terminal abaixo." -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Procure a mensagem da Microsoft iniciando com:" -ForegroundColor White
-    Write-Host "  'To sign in, use a web browser to open the page...'" -ForegroundColor Green
+    Write-Host "  'Para entrar, use um navegador da Web para abrir a página...'" -ForegroundColor Green
+    Write-Host "  (Ou 'To sign in, use a web browser to open the page...')" -ForegroundColor Green
     Write-Host "************************************************************" -ForegroundColor Yellow
     Write-Host ""
     
     try {
-        if (-not [string]::IsNullOrEmpty($TenantId)) {
-            Connect-MgGraph -TenantId $TenantId -Scopes $scopes -UseDeviceCode -ContextScope Process -ErrorAction Stop
-        } else {
-            Connect-MgGraph -Scopes $scopes -UseDeviceCode -ContextScope Process -ErrorAction Stop
+        $connectCommand = Get-Command Connect-MgGraph -ErrorAction Stop
+        $connectParams = @{
+            Scopes       = $scopes
+            ContextScope = "Process"
+            ErrorAction  = "Stop"
         }
+
+        if (-not [string]::IsNullOrEmpty($TenantId)) {
+            $connectParams["TenantId"] = $TenantId
+        }
+
+        if ($connectCommand.Parameters.ContainsKey("UseDeviceCode")) {
+            $connectParams["UseDeviceCode"] = $true
+        }
+        elseif ($connectCommand.Parameters.ContainsKey("UseDeviceAuthentication")) {
+            $connectParams["UseDeviceAuthentication"] = $true
+        }
+        else {
+            Write-Warn "Parâmetro de Device Code não encontrado. Usando autenticação interativa padrão."
+        }
+
+        Connect-MgGraph @connectParams
     }
     catch {
         $errorMessage = $_.ToString()
@@ -740,8 +771,21 @@ try {
         
         # Tentar aplicar consentimento automático (AppRoleAssignments)
         $automaticConsentFailed = $false
+        
+        Write-Info "Buscando permissões já concedidas para evitar duplicidade..."
+        $existingAssignments = Get-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $sp.Id -All -ErrorAction SilentlyContinue
+        
         foreach ($permission in $permissions) {
             $roleId = $appRoleMap[$permission]
+            
+            $alreadyGranted = $existingAssignments | Where-Object {
+                $_.ResourceId -eq $graphSp.Id -and $_.AppRoleId -eq $roleId
+            }
+            if ($alreadyGranted) {
+                Write-Info "A permissão '$permission' já estava concedida."
+                continue
+            }
+            
             Write-Info "Tentando conceder a permissão '$permission' de forma automática..."
             try {
                 New-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $sp.Id -PrincipalId $sp.Id -ResourceId $graphSp.Id -AppRoleId $roleId -ErrorAction Stop | Out-Null
@@ -852,6 +896,7 @@ try {
                     secretExpiresAt     = $secretResult.ExpiresAt
                     createdAt            = $createdAt
                     permissionsRequested = $permissions
+                    adminConsentUrl      = $consentUrl
                     onboardingStatus     = "ready"
                 }
                 
