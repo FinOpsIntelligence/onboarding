@@ -160,7 +160,7 @@ function Connect-GraphForOnboarding {
         $connectParams["TenantId"] = $TenantId
     }
     
-    Connect-MgGraph @connectParams | Out-Null
+    Connect-MgGraph @connectParams
     
     $ctx = Get-MgContext
     if (-not $ctx -or -not $ctx.TenantId) {
