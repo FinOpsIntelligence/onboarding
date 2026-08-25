@@ -91,10 +91,27 @@ FINOPS_RECOMMENDATION_POLICY_JSON='{
 aws iam put-user-policy --user-name "$IAM_USER_NAME" --policy-name "FinOpsRecommendationGeneration" --policy-document "$FINOPS_RECOMMENDATION_POLICY_JSON" >/dev/null
 echo -e "  \e[1;32m✓ 'FinOpsRecommendationGeneration' inline policy attached successfully.\e[0m"
 
+# Dispara a geração inicial de recomendações de Savings Plans na AWS
+echo "Requesting initial Savings Plans recommendation generation..."
+aws ce start-savings-plans-purchase-recommendation-generation >/dev/null 2>&1 || true
+echo -e "  \e[1;32m✓ Savings Plans recommendation calculation initiated.\e[0m"
+
 # 3.2) Enable AWS Compute Optimizer (Free Tier) to generate EC2/AutoScaling Rightsizing recommendations
 echo "Activating AWS Compute Optimizer for rightsizing recommendations..."
 aws compute-optimizer update-enrollment-status --status Active >/dev/null 2>&1 || true
 echo -e "  \e[1;32m✓ AWS Compute Optimizer enrollment verified.\e[0m"
+
+# 3.3) Activate Standard Cost Allocation Tags for FinOps chargeback & governance
+echo "Activating standard Cost Allocation Tags (env, owner, project, cost-center)..."
+aws ce update-cost-allocation-tags-status \
+  --cost-allocation-tags-status \
+    TagKey=env,Status=Active \
+    TagKey=environment,Status=Active \
+    TagKey=owner,Status=Active \
+    TagKey=project,Status=Active \
+    TagKey=cost-center,Status=Active \
+    TagKey=team,Status=Active >/dev/null 2>&1 || true
+echo -e "  \e[1;32m✓ Standard Cost Allocation Tags activation requested.\e[0m"
 
 # 4) Attach DenySensitive Inline Policy for Security Hardening
 echo "Attaching 'DenySensitive' inline policy to '$IAM_USER_NAME'..."
