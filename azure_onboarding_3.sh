@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # FinOps Intelligence Azure Onboarding Bootstrap Script
-# Starter Daily + Deep — active subscription
+# Starter Daily + Deep — active subscription — v3 propagation-safe
 # ==============================================================================
 #
 # Creates one Service Principal and grants the read-only permissions required by
@@ -291,33 +291,82 @@ ensure_provider_role() {
 
 # ------------------------------------------------------------------------------
 # Temporary root elevation
+#
+# elevateAccess is asynchronous from an RBAC propagation perspective. A 200/204
+# response means the request was accepted, not that Microsoft.Authorization/*
+# is immediately effective in ARM. We therefore poll the root role assignment
+# until User Access Administrator @ "/" is actually visible for the caller.
 # ------------------------------------------------------------------------------
 
-list_current_user_root_uaa_ids() {
-  [[ -z "$CURRENT_USER_OBJECT_ID" ]] && return 0
+ROOT_UAA_ASSIGNMENT_ID=""
+ROOT_UAA_PREEXISTING="false"
 
-  az role assignment list \
-    --assignee-object-id "$CURRENT_USER_OBJECT_ID" \
-    --scope "/" \
-    --include-inherited false \
-    -o json 2>/dev/null \
-    | jq -r \
-        --arg rid "$(full_role_definition_id "$UAA_ROLE_ID")" \
-        '.[]?
-         | select(((.roleDefinitionId // "") | ascii_downcase) == ($rid | ascii_downcase))
-         | .id // empty' \
-    || true
+find_current_user_root_uaa_id() {
+  [[ -z "$CURRENT_USER_OBJECT_ID" ]] && return 1
+
+  local url payload
+  url="https://management.azure.com/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&%24filter=principalId%20eq%20%27${CURRENT_USER_OBJECT_ID}%27"
+
+  payload=$(az rest \
+    --method get \
+    --url "$url" \
+    -o json 2>/dev/null || true)
+
+  [[ -z "$payload" ]] && return 1
+
+  jq -r \
+    --arg pid "$CURRENT_USER_OBJECT_ID" \
+    --arg rid "$(full_role_definition_id "$UAA_ROLE_ID")" \
+    '.value[]?
+     | select(
+         ((.properties.principalId // "") | ascii_downcase) == ($pid | ascii_downcase)
+         and
+         ((.properties.roleDefinitionId // "") | ascii_downcase) == ($rid | ascii_downcase)
+       )
+     | .id // empty' \
+    <<<"$payload" \
+    | head -n 1
+}
+
+wait_for_root_uaa_visibility() {
+  local attempt assignment_id
+
+  echo "Waiting for root User Access Administrator assignment to become effective..."
+
+  for attempt in {1..30}; do
+    az account get-access-token \
+      --resource "https://management.azure.com/" \
+      --output none >/dev/null 2>&1 || true
+
+    assignment_id=$(find_current_user_root_uaa_id || true)
+
+    if [[ -n "$assignment_id" ]]; then
+      ROOT_UAA_ASSIGNMENT_ID="$assignment_id"
+      ok "User Access Administrator @ / is now visible."
+      return 0
+    fi
+
+    sleep 5
+  done
+
+  return 1
 }
 
 try_elevate_access() {
-  local before_ids after_ids assignment_id err_file err_text
+  local existing_id err_file err_text
 
   if [[ -z "$CURRENT_USER_OBJECT_ID" ]]; then
     warn "Signed-in user Object ID could not be resolved; automatic elevateAccess cannot be attempted."
     return 1
   fi
 
-  before_ids="$(list_current_user_root_uaa_ids)"
+  existing_id=$(find_current_user_root_uaa_id || true)
+  if [[ -n "$existing_id" ]]; then
+    ROOT_UAA_ASSIGNMENT_ID="$existing_id"
+    ROOT_UAA_PREEXISTING="true"
+    ok "User already has User Access Administrator @ /."
+    return 0
+  fi
 
   echo ""
   echo "Provider-scope RBAC assignment requires tenant/root authorization."
@@ -332,21 +381,14 @@ try_elevate_access() {
 
     rm -f "$err_file"
     ELEVATED_BY_SCRIPT="true"
-    ok "Temporary root User Access Administrator access granted."
+    ok "Temporary root elevation request accepted."
 
-    # Allow RBAC propagation.
-    sleep 10
+    if wait_for_root_uaa_visibility; then
+      return 0
+    fi
 
-    after_ids="$(list_current_user_root_uaa_ids)"
-
-    while IFS= read -r assignment_id; do
-      [[ -z "$assignment_id" ]] && continue
-      if ! grep -Fqx "$assignment_id" <<<"$before_ids"; then
-        ELEVATED_ASSIGNMENT_IDS+=("$assignment_id")
-      fi
-    done <<<"$after_ids"
-
-    return 0
+    warn "elevateAccess was accepted, but User Access Administrator @ / did not become visible."
+    return 1
   fi
 
   err_text=$(cat "$err_file" 2>/dev/null || true)
@@ -359,33 +401,84 @@ try_elevate_access() {
   return 1
 }
 
+ensure_provider_role_with_retry() {
+  local role_id="$1"
+  local role_name="$2"
+  local scope="$3"
+  local label="$4"
+  local attempt last_error=""
+
+  for attempt in {1..18}; do
+    if ensure_provider_role "$role_id" "$role_name" "$scope" "$label"; then
+      return 0
+    fi
+
+    last_error="$LAST_ROLE_ERROR"
+
+    if ! is_authorization_error "$last_error"; then
+      return 1
+    fi
+
+    if [[ "$attempt" -lt 18 ]]; then
+      warn "$label is not effective yet; retrying after RBAC propagation..."
+      sleep 5
+    fi
+  done
+
+  LAST_ROLE_ERROR="$last_error"
+  return 1
+}
+
 cleanup_elevation() {
   if [[ "$ELEVATED_BY_SCRIPT" != "true" ]]; then
+    return
+  fi
+
+  if [[ "$ROOT_UAA_PREEXISTING" == "true" ]]; then
     return
   fi
 
   echo ""
   echo "Removing temporary elevated root access..."
 
-  if [[ ${#ELEVATED_ASSIGNMENT_IDS[@]} -eq 0 ]]; then
-    warn "Temporary elevation succeeded, but the new root assignment ID could not be identified automatically."
-    warn "Review Azure RBAC at scope '/' and remove the temporary User Access Administrator assignment if it remains."
+  if [[ -z "$ROOT_UAA_ASSIGNMENT_ID" ]]; then
+    ROOT_UAA_ASSIGNMENT_ID=$(find_current_user_root_uaa_id || true)
+  fi
+
+  if [[ -z "$ROOT_UAA_ASSIGNMENT_ID" ]]; then
+    warn "Temporary elevation was requested, but its exact root role assignment could not be resolved."
+    warn "Review Microsoft Entra ID > Properties > Access management for Azure resources and disable it if still enabled."
     return
   fi
 
-  local assignment_id err_file
-  for assignment_id in "${ELEVATED_ASSIGNMENT_IDS[@]}"; do
+  local url err_file err_text attempt
+  url="https://management.azure.com${ROOT_UAA_ASSIGNMENT_ID}?api-version=2022-04-01"
+
+  for attempt in {1..10}; do
     err_file=$(mktemp)
-    if az role assignment delete --ids "$assignment_id" 2>"$err_file"; then
-      ok "Temporary root role assignment removed."
-    else
-      warn "Could not remove temporary root role assignment: $assignment_id"
-      [[ -s "$err_file" ]] && sed 's/^/    /' "$err_file" >&2
+
+    if az rest \
+      --method delete \
+      --url "$url" \
+      --output none 2>"$err_file"; then
+      rm -f "$err_file"
+      ok "Temporary User Access Administrator @ / removed."
+      ELEVATED_BY_SCRIPT="false"
+      ROOT_UAA_ASSIGNMENT_ID=""
+      return
     fi
+
+    err_text=$(cat "$err_file" 2>/dev/null || true)
     rm -f "$err_file"
+
+    if [[ "$attempt" -lt 10 ]]; then
+      sleep 3
+    fi
   done
 
-  ELEVATED_BY_SCRIPT="false"
+  warn "Could not automatically remove temporary root elevation."
+  [[ -n "${err_text:-}" ]] && sed 's/^/    /' <<<"$err_text" >&2
+  warn "Disable 'Access management for Azure resources' for the signed-in Global Administrator after this onboarding."
 }
 
 trap cleanup_elevation EXIT
@@ -548,7 +641,7 @@ if [[ "$TENANT_SP_OK" != "true" || "$TENANT_RES_OK" != "true" ]]; then
       echo "Retrying tenant-level assignments after elevation..."
 
       if [[ "$TENANT_SP_OK" != "true" ]]; then
-        if ensure_provider_role \
+        if ensure_provider_role_with_retry \
           "$SAVINGS_PLAN_READER_ROLE_ID" \
           "$SAVINGS_PLAN_READER_ROLE_NAME" \
           "$SP_SCOPE" \
@@ -558,7 +651,7 @@ if [[ "$TENANT_SP_OK" != "true" || "$TENANT_RES_OK" != "true" ]]; then
       fi
 
       if [[ "$TENANT_RES_OK" != "true" ]]; then
-        if ensure_provider_role \
+        if ensure_provider_role_with_retry \
           "$RESERVATIONS_READER_ROLE_ID" \
           "$RESERVATIONS_READER_ROLE_NAME" \
           "$RES_SCOPE" \
