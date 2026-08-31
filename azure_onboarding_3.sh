@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # FinOps Intelligence Azure Onboarding Bootstrap Script
-# Starter Daily + Deep — active subscription — v3 propagation-safe
+# Starter Daily + Deep — active subscription — v4 idempotent identity + ARM RBAC
 # ==============================================================================
 #
 # Creates one Service Principal and grants the read-only permissions required by
@@ -129,26 +129,39 @@ PY
 
 # ------------------------------------------------------------------------------
 # Subscription-level RBAC
+#
+# Use ARM REST instead of `az role assignment create`.
+# This avoids the Cloud Shell legacy-token path that can request an audience for
+# management.core.windows.net and fail before the assignment is even attempted.
 # ------------------------------------------------------------------------------
+
+subscription_role_definition_resource_id() {
+  local role_id="$1"
+  printf '%s/providers/Microsoft.Authorization/roleDefinitions/%s' "$SUB_SCOPE" "$role_id"
+}
 
 subscription_role_assignment_exists() {
   local role_id="$1"
   local scope="$2"
-  local full_role_id
-  full_role_id="$(full_role_definition_id "$role_id")"
+  local url payload
 
-  local payload
-  payload=$(az role assignment list \
-    --assignee-object-id "$SP_OBJECT_ID" \
-    --scope "$scope" \
-    --include-inherited false \
+  url="https://management.azure.com${scope}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&%24filter=principalId%20eq%20%27${SP_OBJECT_ID}%27"
+
+  payload=$(az rest \
+    --method get \
+    --url "$url" \
     -o json 2>/dev/null || true)
 
   [[ -z "$payload" ]] && return 1
 
   jq -e \
-    --arg rid "$full_role_id" \
-    'any(.[]?; ((.roleDefinitionId // "") | ascii_downcase) == ($rid | ascii_downcase))' \
+    --arg pid "$SP_OBJECT_ID" \
+    --arg rid "$role_id" \
+    'any(.value[]?;
+      ((.properties.principalId // "") | ascii_downcase) == ($pid | ascii_downcase)
+      and
+      ((.properties.roleDefinitionId // "") | ascii_downcase | endswith(("/" + ($rid | ascii_downcase))))
+    )' \
     <<<"$payload" >/dev/null 2>&1
 }
 
@@ -165,14 +178,30 @@ ensure_subscription_role() {
     return 0
   fi
 
-  local err_file err_text
+  local assignment_uuid role_definition_id url body err_file err_text
+  assignment_uuid="$(deterministic_assignment_uuid "$SP_OBJECT_ID" "$scope" "$role_id")"
+  role_definition_id="$(subscription_role_definition_resource_id "$role_id")"
+
+  url="https://management.azure.com${scope}/providers/Microsoft.Authorization/roleAssignments/${assignment_uuid}?api-version=2022-04-01"
+
+  body=$(jq -nc \
+    --arg rid "$role_definition_id" \
+    --arg pid "$SP_OBJECT_ID" \
+    '{
+      properties: {
+        roleDefinitionId: $rid,
+        principalId: $pid,
+        principalType: "ServicePrincipal"
+      }
+    }')
+
   err_file=$(mktemp)
 
-  if az role assignment create \
-    --assignee-object-id "$SP_OBJECT_ID" \
-    --assignee-principal-type ServicePrincipal \
-    --role "$role_id" \
-    --scope "$scope" \
+  if az rest \
+    --method put \
+    --url "$url" \
+    --headers "Content-Type=application/json" \
+    --body "$body" \
     --output none 2>"$err_file"; then
     rm -f "$err_file"
     ok "$label assigned successfully."
@@ -509,63 +538,146 @@ echo ""
 CURRENT_USER_OBJECT_ID=$(az ad signed-in-user show --query id -o tsv 2>/dev/null || true)
 
 # ------------------------------------------------------------------------------
-# Create Service Principal + credential
+# Create or reuse App Registration + Service Principal + generate credential
+#
+# Do NOT use `az ad sp create-for-rbac`.
+# Identity creation and Azure RBAC are intentionally separate operations.
+# Re-runs reuse the exact existing App Registration/SP for DISPLAY_NAME.
+# A new password credential is appended instead of deleting existing credentials.
 # ------------------------------------------------------------------------------
 
-echo "Creating Service Principal and credentials..."
+echo "Resolving FinOps Intelligence App Registration..."
 
-CREATE_ERR=$(mktemp)
-SP_INFO=""
+APP_LIST=$(az ad app list \
+  --display-name "$DISPLAY_NAME" \
+  --output json 2>/dev/null || echo '[]')
 
-if SP_INFO=$(az ad sp create-for-rbac \
-  --name "$DISPLAY_NAME" \
-  --role "$READER_ROLE_ID" \
-  --scopes "$SUB_SCOPE" \
-  --output json 2>"$CREATE_ERR"); then
+EXACT_APPS=$(jq -c \
+  --arg name "$DISPLAY_NAME" \
+  '[.[]? | select(.displayName == $name)]' \
+  <<<"$APP_LIST" 2>/dev/null || echo '[]')
 
-  CLIENT_ID=$(jq -r '.appId // empty' <<<"$SP_INFO")
-  CLIENT_SECRET=$(jq -r '.password // empty' <<<"$SP_INFO")
-  ok "Service Principal created via create-for-rbac."
+APP_COUNT=$(jq 'length' <<<"$EXACT_APPS" 2>/dev/null || echo "0")
 
-else
-  warn "create-for-rbac failed; trying explicit App Registration flow."
-  [[ -s "$CREATE_ERR" ]] && sed 's/^/    /' "$CREATE_ERR" >&2
-
+if [[ "$APP_COUNT" -eq 0 ]]; then
+  echo "Creating App Registration..."
   APP_JSON=$(az ad app create \
     --display-name "$DISPLAY_NAME" \
     --output json)
 
   CLIENT_ID=$(jq -r '.appId // empty' <<<"$APP_JSON")
+  APP_OBJECT_ID=$(jq -r '.id // empty' <<<"$APP_JSON")
 
   if [[ -z "$CLIENT_ID" ]]; then
-    rm -f "$CREATE_ERR"
     err "Application registration did not return appId."
     exit 1
   fi
 
-  az ad sp create --id "$CLIENT_ID" --output none
+  ok "App Registration created."
 
-  SECRET_JSON=$(az ad app credential reset \
+elif [[ "$APP_COUNT" -eq 1 ]]; then
+  CLIENT_ID=$(jq -r '.[0].appId // empty' <<<"$EXACT_APPS")
+  APP_OBJECT_ID=$(jq -r '.[0].id // empty' <<<"$EXACT_APPS")
+  ok "Existing App Registration found; reusing it."
+
+else
+  # Duplicate display names are ambiguous. Resolve automatically only if exactly
+  # one of those applications already has a Service Principal in this tenant.
+  MATCHING_WITH_SP=()
+  while IFS= read -r candidate_app_id; do
+    [[ -z "$candidate_app_id" ]] && continue
+    candidate_sp=$(az ad sp show \
+      --id "$candidate_app_id" \
+      --query id \
+      -o tsv 2>/dev/null || true)
+    if [[ -n "$candidate_sp" ]]; then
+      MATCHING_WITH_SP+=("$candidate_app_id")
+    fi
+  done < <(jq -r '.[].appId // empty' <<<"$EXACT_APPS")
+
+  if [[ "${#MATCHING_WITH_SP[@]}" -eq 1 ]]; then
+    CLIENT_ID="${MATCHING_WITH_SP[0]}"
+    APP_OBJECT_ID=$(jq -r \
+      --arg cid "$CLIENT_ID" \
+      '.[] | select(.appId == $cid) | .id // empty' \
+      <<<"$EXACT_APPS" | head -n 1)
+    warn "Multiple App Registrations share the display name; reused the only one with an existing Service Principal."
+  else
+    err "Multiple App Registrations named '$DISPLAY_NAME' were found and cannot be resolved safely."
+    echo "Matching application IDs:" >&2
+    jq -r '.[].appId' <<<"$EXACT_APPS" | sed 's/^/  - /' >&2
+    echo "Remove the obsolete duplicates in Microsoft Entra ID and run onboarding again." >&2
+    exit 1
+  fi
+fi
+
+if [[ -z "$CLIENT_ID" ]]; then
+  err "Could not resolve application client ID."
+  exit 1
+fi
+
+echo "Ensuring Service Principal exists..."
+
+SP_OBJECT_ID=$(az ad sp show \
+  --id "$CLIENT_ID" \
+  --query id \
+  -o tsv 2>/dev/null || true)
+
+if [[ -n "$SP_OBJECT_ID" ]]; then
+  ok "Existing Service Principal found; reusing it."
+else
+  SP_CREATE_ERROR=""
+  SP_CREATE_ERR_FILE=$(mktemp)
+
+  if az ad sp create \
     --id "$CLIENT_ID" \
-    --output json)
+    --output none 2>"$SP_CREATE_ERR_FILE"; then
+    ok "Service Principal created."
+  else
+    SP_CREATE_ERROR=$(cat "$SP_CREATE_ERR_FILE" 2>/dev/null || true)
 
-  CLIENT_SECRET=$(jq -r '.password // empty' <<<"$SECRET_JSON")
-  ok "Service Principal created via explicit App Registration flow."
-fi
+    # A previous/parallel run may have created the SP between show and create.
+    if grep -qiE 'already in use|already exists|service principal.*exists' <<<"$SP_CREATE_ERROR"; then
+      warn "Service Principal already exists; waiting for Microsoft Graph propagation."
+    else
+      rm -f "$SP_CREATE_ERR_FILE"
+      err "Service Principal creation failed."
+      [[ -n "$SP_CREATE_ERROR" ]] && sed 's/^/    /' <<<"$SP_CREATE_ERROR" >&2
+      exit 1
+    fi
+  fi
 
-rm -f "$CREATE_ERR"
+  rm -f "$SP_CREATE_ERR_FILE"
 
-if [[ -z "$CLIENT_ID" || -z "$CLIENT_SECRET" ]]; then
-  err "Could not obtain Service Principal credentials."
-  exit 1
-fi
-
-if ! wait_for_sp_object; then
-  err "Could not resolve Service Principal Object ID after creation."
-  exit 1
+  if ! wait_for_sp_object; then
+    err "Could not resolve Service Principal Object ID after creation/reuse."
+    exit 1
+  fi
 fi
 
 ok "Service Principal Object ID resolved."
+
+echo "Generating onboarding credential..."
+
+CREDENTIAL_DISPLAY_NAME="FinOps-Intelligence-Onboarding-$(date -u +%Y%m%dT%H%M%SZ)"
+
+# --append is intentional: a retry must not revoke a credential that may already
+# have been pasted into the platform. Old test credentials can be revoked later.
+SECRET_JSON=$(az ad app credential reset \
+  --id "$CLIENT_ID" \
+  --append \
+  --display-name "$CREDENTIAL_DISPLAY_NAME" \
+  --years 1 \
+  --output json)
+
+CLIENT_SECRET=$(jq -r '.password // empty' <<<"$SECRET_JSON")
+
+if [[ -z "$CLIENT_SECRET" ]]; then
+  err "Could not generate the client secret."
+  exit 1
+fi
+
+ok "New client secret generated without removing existing credentials."
 
 # ------------------------------------------------------------------------------
 # Subscription roles
@@ -729,7 +841,7 @@ fi
 
 err "Onboarding completed with missing permissions. FinOps Azure is NOT fully ready for Daily + Deep."
 echo ""
-echo "The Service Principal was created and the credentials above remain valid."
+echo "The App Registration / Service Principal were created or reused and the credentials above remain valid."
 echo "Service Principal Object ID:"
 echo "  $SP_OBJECT_ID"
 echo ""
