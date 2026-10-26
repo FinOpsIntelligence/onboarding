@@ -123,19 +123,14 @@ DENY_POLICY_JSON='{
       "Effect": "Deny",
       "Resource": "*",
       "Action": [
-        "s3:GetObject",
-        "s3:GetObjectVersion",
-        "s3:GetObjectAcl",
+        "s3:GetObject*",
+        "s3:SelectObjectContent",
         "secretsmanager:GetSecretValue",
+        "secretsmanager:BatchGetSecretValue",
         "kms:Decrypt",
-        "kms:GenerateDataKey",
-        "kms:GenerateDataKeyWithoutPlaintext",
-        "kms:ReEncryptFrom",
-        "kms:ReEncryptTo",
-        "ssm:GetParameter",
-        "ssm:GetParameters",
-        "ssm:GetParametersByPath",
-        "ssm:GetParameterHistory"
+        "kms:GenerateDataKey*",
+        "kms:ReEncrypt*",
+        "ssm:GetParameter*"
       ]
     }
   ]
